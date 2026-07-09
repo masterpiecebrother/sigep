@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { loadInitialData, saveTasks, saveUsers, saveConfig } from '../lib/persistence';
 import * as XLSX from 'xlsx';
 import {
   Play, Pause, Plus, Shield, Users, BarChart3, Clock, AlertTriangle, CheckCircle2, FileText, Table2, AlertCircle, Calendar, Filter, ArrowRight, Target, Trash2, Search, X, Undo2, Redo2, Save, History as HistoryIcon, Download, Settings, Info, Upload, GripVertical, User as UserIcon, ChevronRight, Layers, Activity, BookOpen, Columns
@@ -1362,6 +1363,39 @@ export default function App() {
 
   const showToast = (msg) => { setToastMessage(msg); setTimeout(() => setToastMessage(null), 3500); };
 
+  // --- Persistência: carrega dados do banco (Neon) ao montar ---
+  const [dbLoading, setDbLoading] = useState(true);
+  const [dbError, setDbError]     = useState(null);
+  const hydratedRef = useRef(false);
+  useEffect(() => {
+    let cancel = false;
+    loadInitialData()
+      .then(({ tasks, users, config }) => {
+        if (cancel) return;
+        if (Array.isArray(tasks) && tasks.length) {
+          setTasks(tasks);
+          setHistory([{ timestamp: Date.now(), data: tasks }]);
+          setHistoryIndex(0);
+        }
+        if (Array.isArray(users) && users.length) {
+          setUsers(users);
+          setTempUsers(users);
+          setCurrentUser(users[0]);
+        }
+        if (config) { setSystemConfig(config); setTempConfig(config); }
+        hydratedRef.current = true;
+        setDbLoading(false);
+      })
+      .catch((err) => {
+        if (cancel) return;
+        console.error('[SGEP] Falha ao carregar do banco:', err);
+        setDbError('Não foi possível conectar ao banco de dados. Exibindo dados locais.');
+        hydratedRef.current = true; // permite gravar depois que o usuário editar
+        setDbLoading(false);
+      });
+    return () => { cancel = true; };
+  }, []);
+
   const getModalityFactor = (modality) => {
     if (!modality) return systemConfig.factorPresencial;
     const m = modality.toLowerCase();
@@ -1399,7 +1433,9 @@ export default function App() {
     h.push({ timestamp: Date.now(), data: newTasks });
     setHistory(h);
     setHistoryIndex(h.length - 1);
-    onTasksChange?.(newTasks, deletedId ?? null);
+    // Grava no banco (Neon) — só depois da carga inicial, para não
+    // sobrescrever o banco com os dados-semente durante a hidratação.
+    if (hydratedRef.current) saveTasks(newTasks, () => showToast('Erro ao salvar no banco.'));
   };
   const handleUndo = () => { if (historyIndex > 0) { setHistoryIndex(historyIndex-1); setTasks(history[historyIndex-1].data); } };
   const handleRedo = () => { if (historyIndex < history.length-1) { setHistoryIndex(historyIndex+1); setTasks(history[historyIndex+1].data); } };
@@ -1561,6 +1597,11 @@ export default function App() {
     setUsers(resolvedUsers);
     const upd = resolvedUsers.find(u => u.id===currentUser.id);
     if (upd) { setCurrentUser(upd); if (upd.role!=='admin' && currentView==='configuracoes') setCurrentView('tabela_dinamica'); }
+    // Grava config e servidores no banco (Neon).
+    if (hydratedRef.current) {
+      saveConfig(nc, () => showToast('Erro ao salvar configuração no banco.'));
+      saveUsers(resolvedUsers, () => showToast('Erro ao salvar servidores no banco.'));
+    }
     showToast("Configurações salvas!");
   };
 
