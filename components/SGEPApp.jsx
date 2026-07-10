@@ -1329,8 +1329,14 @@ export default function App() {
     return () => clearInterval(t);
   }, []);
 
-  const [now, setNow] = useState(new Date());
+  // `mounted` só fica true depois da hidratação no cliente. Usado para adiar
+  // qualquer cálculo baseado em data/hora, que difere entre servidor e cliente
+  // e quebra a hidratação do React (erros #418/#423/#425).
+  const [mounted, setMounted] = useState(false);
+  const [now, setNow] = useState(null);
   useEffect(() => {
+    setMounted(true);
+    setNow(new Date());
     const t = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(t);
   }, []);
@@ -1413,17 +1419,20 @@ export default function App() {
     return systemConfig.factorPresencial;
   };
 
+  // Valor inicial ESTÁVEL (igual no servidor e no cliente) para não quebrar a
+  // hidratação. A data real é definida no cliente logo após montar.
   const [todayDate, setTodayDate] = useState(() => {
-    const d = new Date(); d.setHours(0,0,0,0); return d;
+    const d = new Date('2026-01-01T00:00:00'); d.setHours(0,0,0,0); return d;
   });
   useEffect(() => {
+    const setToday = () => { const d = new Date(); d.setHours(0,0,0,0); setTodayDate(d); };
+    setToday(); // corrige para a data real assim que monta no cliente
     const msToMidnight = () => {
       const now = new Date();
       return new Date(now.getFullYear(), now.getMonth(), now.getDate()+1).getTime() - now.getTime();
     };
     let t = setTimeout(function tick() {
-      const d = new Date(); d.setHours(0,0,0,0);
-      setTodayDate(d);
+      setToday();
       t = setTimeout(tick, msToMidnight());
     }, msToMidnight());
     return () => clearTimeout(t);
@@ -2381,7 +2390,8 @@ export default function App() {
                 </div>
                 <div className={`flex flex-col gap-3 flex-shrink-0 ${pinnedCards ? 'sticky top-0 z-10 bg-[#F1F3F7] py-2 -mx-6 px-6 shadow-sm' : ''}`}>
                 {(() => {
-                  const todayStr = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+                  const nowRef = now || todayDate;
+                  const todayStr = `${nowRef.getFullYear()}-${String(nowRef.getMonth()+1).padStart(2,'0')}-${String(nowRef.getDate()).padStart(2,'0')}`;
                   const [refY, refMidx] = refMonthForCarga.split('-').map(Number);
                   const refLabel = new Date(refY, refMidx-1, 1).toLocaleString('pt-BR',{month:'long',year:'numeric'});
                   const todayActive = tasks.filter(t =>
@@ -2394,10 +2404,10 @@ export default function App() {
                         <Clock size={18} className="text-[#0B2461] flex-shrink-0"/>
                         <div>
                           <p className="font-sora font-bold text-[#0B2461] text-xl leading-none tabular-nums tracking-tight">
-                            {now.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit',second:'2-digit'})}
+                            {now ? now.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '--:--:--'}
                           </p>
                           <p className="text-gray-500 text-[10px] mt-0.5 capitalize">
-                            {now.toLocaleDateString('pt-BR',{weekday:'long',day:'2-digit',month:'long',year:'numeric'})}
+                            {now ? now.toLocaleDateString('pt-BR',{weekday:'long',day:'2-digit',month:'long',year:'numeric'}) : ''}
                           </p>
                         </div>
                       </div>
