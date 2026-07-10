@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { loadInitialData, saveTasks, saveUsers, saveConfig } from '../lib/persistence';
+import { loadInitialData, saveTasks, saveUsers, saveConfig, registerFlushOnUnload } from '../lib/persistence';
 import * as XLSX from 'xlsx';
 import {
   Play, Pause, Plus, Shield, Users, BarChart3, Clock, AlertTriangle, CheckCircle2, FileText, Table2, AlertCircle, Calendar, Filter, ArrowRight, Target, Trash2, Search, X, Undo2, Redo2, Save, History as HistoryIcon, Download, Settings, Info, Upload, GripVertical, User as UserIcon, ChevronRight, Layers, Activity, BookOpen, Columns
@@ -767,9 +767,14 @@ function KanbanView({ tasks, users, onStatusChange, onAssigneeChange, onReorder,
     if (!taskId) return;
     const task = tasks.find(t => t.id === taskId);
     if (!task) return;
-    if (task.status !== st) onStatusChange(taskId, st);
-    if (task.assigned_to !== uid && onAssigneeChange) onAssigneeChange(taskId, uid);
-    if (onReorder) onReorder(taskId, uid, st, before);
+    // Uma única atualização consolidada (status + responsável + ordem).
+    // Evita 3 commits concorrentes com estado obsoleto se sobrescrevendo.
+    if (onReorder) {
+      onReorder(taskId, uid, st, before);
+    } else {
+      if (task.status !== st) onStatusChange(taskId, st);
+      if (task.assigned_to !== uid && onAssigneeChange) onAssigneeChange(taskId, uid);
+    }
     setDragging(null); setDragOver(null);
   };
   const onEnd = () => { setDragging(null); setDragOver(null); };
@@ -1383,7 +1388,11 @@ export default function App() {
           setCurrentUser(users[0]);
         }
         if (config) { setSystemConfig(config); setTempConfig(config); }
-        hydratedRef.current = true;
+        // Só libera gravações DEPOIS de aplicar os dados do banco no estado.
+        // Um pequeno atraso garante que os setState acima já foram processados,
+        // evitando que uma regravação use os dados-semente antigos (race condition).
+        setTimeout(() => { hydratedRef.current = true; }, 0);
+        registerFlushOnUnload();
         setDbLoading(false);
       })
       .catch((err) => {
@@ -1450,15 +1459,44 @@ export default function App() {
   const handleAssigneeChange = (id, v) => commitTasks(tasks.map(t => t.id!==id?t:{ ...t, assigned_to:v }));
 
   const handleKanbanReorder = (taskId, targetUserId, targetStatus, insertBeforeId) => {
-
     const task = tasks.find(t => t.id === taskId);
-    if (!task || !insertBeforeId) return;
-    const others = tasks.filter(t => t.id !== taskId);
-    const insertIdx = others.findIndex(t => t.id === insertBeforeId);
-    if (insertIdx < 0) return;
-    const newTasks = [...others];
-    newTasks.splice(insertIdx, 0, task);
-    commitTasks(newTasks);
+    if (!task) return;
+
+    // Aplica a mudança de coluna (status) e de linha (responsável), com os
+    // mesmos efeitos colaterais do handleStatusChange (conclusão, cronômetro).
+    const applyMove = (t) => {
+      if (t.id !== taskId) return t;
+      const updated = { ...t };
+      if (targetStatus != null && targetStatus !== '') {
+        updated.status = targetStatus;
+        if (targetStatus === 'Concluído') {
+          updated.is_running = false;
+          updated.data_conclusao = t.data_conclusao || new Date().toISOString();
+        } else if (targetStatus === 'Pendente') {
+          updated.is_running = false;
+          updated.data_conclusao = null;
+        } else {
+          updated.data_conclusao = null;
+        }
+      }
+      if (targetUserId != null) updated.assigned_to = targetUserId;
+      return updated;
+    };
+
+    // Se soltou sobre outro card, reordena; senão, apenas move (coluna vazia).
+    if (insertBeforeId) {
+      const others = tasks.filter(t => t.id !== taskId);
+      const insertIdx = others.findIndex(t => t.id === insertBeforeId);
+      if (insertIdx >= 0) {
+        const moved = applyMove(task);
+        const newTasks = [...others];
+        newTasks.splice(insertIdx, 0, moved);
+        commitTasks(newTasks);
+        return;
+      }
+    }
+    // Sem card de referência (coluna/linha vazia): mantém a ordem, só aplica o move.
+    commitTasks(tasks.map(applyMove));
   };
   const handleDateChange     = (id, f, v) => commitTasks(tasks.map(t => t.id!==id?t:{ ...t, [f]:v }));
   const handlePeso2Change    = (id, v) => commitTasks(tasks.map(t => t.id!==id?t:{ ...t, peso2:v }));
